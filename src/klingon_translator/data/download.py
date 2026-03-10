@@ -1,10 +1,20 @@
-"""Data acquisition and preprocessing for Klingon-English parallel corpus."""
+"""Data acquisition and preprocessing for Klingon-English parallel corpus.
+
+Data sources:
+    1. Tatoeba: Community-translated sentence pairs via tatoeba.org API
+    2. boQwI' dictionary: YAML entries from De7vID/klingon-assistant-data
+    3. Curated proverbs: Hand-collected Klingon sayings with translations
+"""
 
 import json
 import random
-import subprocess
-import xml.etree.ElementTree as ET
+import re
+import ssl
+import time
+import urllib.request
 from pathlib import Path
+
+import yaml
 
 from klingon_translator.utils.config import (
     DEFAULT_TEST_SPLIT,
@@ -15,115 +25,209 @@ from klingon_translator.utils.config import (
     ensure_dirs,
 )
 
+# SSL context that skips verification (Tatoeba has cert issues)
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
-def download_tatoeba() -> list[dict[str, str]]:
-    """Download Klingon-English sentence pairs from Tatoeba via OPUS.
+
+def download_tatoeba(max_pages: int = 100) -> list[dict[str, str]]:
+    """Download Klingon-English sentence pairs from Tatoeba website API.
+
+    Uses the tatoeba.org search API to find Klingon sentences that have
+    English translations. Paginates through all available results.
+
+    Args:
+        max_pages: Maximum number of pages to fetch (10 results per page).
 
     Returns:
         List of {"en": ..., "tlh": ...} dicts.
     """
     ensure_dirs()
-    output_dir = RAW_DATA_DIR / "tatoeba"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = RAW_DATA_DIR / "tatoeba_pairs.json"
 
-    try:
-        subprocess.run(
-            [
-                "opus_read",
-                "-d", "Tatoeba",
-                "-s", "en",
-                "-t", "tlh",
-                "-p", "raw",
-                "-wm", "moses",
-                "-w", str(output_dir / "en.txt"), str(output_dir / "tlh.txt"),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Warning: Could not download Tatoeba data: {e}")
-        print("You may need to install opustools: pip install opustools")
-        return []
+    # Use cached data if available
+    if cache_file.exists():
+        pairs = json.loads(cache_file.read_text(encoding="utf-8"))
+        print(f"Tatoeba: loaded {len(pairs)} cached pairs")
+        return pairs
 
+    print("Tatoeba: downloading from API (this may take a few minutes)...")
     pairs = []
-    en_file = output_dir / "en.txt"
-    tlh_file = output_dir / "tlh.txt"
-    if en_file.exists() and tlh_file.exists():
-        en_lines = en_file.read_text(encoding="utf-8").strip().splitlines()
-        tlh_lines = tlh_file.read_text(encoding="utf-8").strip().splitlines()
-        for en, tlh in zip(en_lines, tlh_lines):
-            en, tlh = en.strip(), tlh.strip()
-            if en and tlh:
-                pairs.append({"en": en, "tlh": tlh})
+    base_url = "https://tatoeba.org/en/api_v0/search?from=tlh&to=eng&query=&page={}"
+
+    for page in range(1, max_pages + 1):
+        url = base_url.format(page)
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "KlingonTranslator/0.1"}
+        )
+
+        try:
+            resp = urllib.request.urlopen(req, context=_SSL_CTX, timeout=30)
+            data = json.loads(resp.read())
+        except Exception as e:
+            print(f"  Warning: page {page} failed: {e}")
+            break
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        for result in results:
+            tlh_text = result.get("text", "").strip()
+            # Translations are nested: [[direct], [indirect]]
+            translations = result.get("translations", [])
+            for group in translations:
+                for trans in group:
+                    if trans.get("lang") == "eng":
+                        en_text = trans.get("text", "").strip()
+                        if tlh_text and en_text:
+                            pairs.append({"en": en_text, "tlh": tlh_text})
+
+        paging = data.get("paging", {}).get("Sentences", {})
+        has_next = paging.get("nextPage", False)
+
+        if page % 10 == 0:
+            print(f"  Page {page}: {len(pairs)} pairs so far...")
+
+        if not has_next:
+            break
+
+        # Be polite to the API
+        time.sleep(0.5)
+
+    # Cache results
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(
+        json.dumps(pairs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print(f"Tatoeba: downloaded {len(pairs)} sentence pairs")
     return pairs
 
 
-def parse_boqwi(xml_path: Path | None = None) -> list[dict[str, str]]:
-    """Parse boQwI' Klingon dictionary data for parallel entries.
+def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
+    """Parse boQwI\' Klingon dictionary YAML data for parallel entries.
+
+    Extracts:
+        - Word entries: Klingon word -> English definition
+        - Sentence entries: Klingon sentence -> English translation
+        - Example sentences embedded in entries
 
     Args:
-        xml_path: Path to the boQwI' XML data file. If None, looks in raw data dir.
+        data_dir: Path to the klingon-assistant-data-main/entries/ directory.
 
     Returns:
         List of {"en": ..., "tlh": ...} dicts.
     """
-    if xml_path is None:
-        xml_path = RAW_DATA_DIR / "boqwi" / "KlingonAssistant" / "data" / "mem-primary.xml"
+    if data_dir is None:
+        data_dir = RAW_DATA_DIR / "klingon-assistant-data-main" / "entries"
 
-    if not xml_path.exists():
-        print(f"boQwI' data not found at {xml_path}")
-        print("Clone it with: git clone https://github.com/De7vID/klingon-assistant-data")
+    if not data_dir.exists():
+        print(f"boQwI\' data not found at {data_dir}")
+        print("Download from: https://github.com/De7vID/klingon-assistant-data")
         return []
 
     pairs = []
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
+    skipped = 0
 
-    for entry in root.iter("entry"):
-        tlh = entry.get("name", "").strip()
-        en = entry.get("definition", "").strip()
-        if tlh and en:
-            pairs.append({"en": en, "tlh": tlh})
+    for yaml_file in sorted(data_dir.rglob("*.yaml")):
+        try:
+            with open(yaml_file, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            skipped += 1
+            continue
 
-        # Also extract example sentences if available
-        for example in entry.iter("example"):
-            ex_tlh = example.get("src", "").strip()
-            ex_en = example.get("dst", "").strip()
-            if ex_tlh and ex_en:
-                pairs.append({"en": ex_en, "tlh": ex_tlh})
+        if not data:
+            continue
 
-    print(f"boQwI': parsed {len(pairs)} entries")
+        # Handle files with single entry or multiple entries
+        entries = []
+        if "entry" in data:
+            entries.append(data["entry"])
+        elif "entries" in data:
+            entries.extend(data["entries"])
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            tlh_name = entry.get("entry_name", "").strip()
+
+            # Get English definition
+            definition = entry.get("definition", "")
+            if isinstance(definition, dict):
+                en_text = definition.get("text", "").strip()
+            elif isinstance(definition, str):
+                en_text = definition.strip()
+            else:
+                en_text = ""
+
+            # Skip template entries (contain "...")
+            if "..." in tlh_name or not tlh_name or not en_text:
+                continue
+
+            # Add pair
+            pairs.append({"en": en_text, "tlh": tlh_name})
+
+            # Extract example sentences if available
+            examples_text = entry.get("examples", "")
+            if examples_text and isinstance(examples_text, str):
+                # Examples format: {klingon:sen:nolink} "English translation"
+                pattern = r'\{(.+?)(?::sen)?(?::nolink)?\}\s*["\u201c]([^"\u201d]+)["\u201d]'
+                for match in re.finditer(pattern, examples_text):
+                    ex_tlh = match.group(1).strip()
+                    ex_en = match.group(2).strip()
+                    # Clean up cross-references
+                    ex_tlh = re.sub(r":[a-z_:]+$", "", ex_tlh)
+                    if ex_tlh and ex_en and "..." not in ex_tlh:
+                        pairs.append({"en": ex_en, "tlh": ex_tlh})
+
+    if skipped:
+        print(f"  (skipped {skipped} unreadable files)")
+    print(f"boQwI\': parsed {len(pairs)} entries")
     return pairs
 
 
 def load_proverbs() -> list[dict[str, str]]:
     """Load curated Klingon proverbs and common phrases.
 
+    Creates a seed file with well-known proverbs if none exists.
+
     Returns:
         List of {"en": ..., "tlh": ...} dicts.
     """
     proverbs_file = RAW_DATA_DIR / "proverbs.json"
     if not proverbs_file.exists():
-        print(f"No proverbs file at {proverbs_file}, creating sample...")
+        print("Creating proverbs seed file...")
         sample = [
-            {"tlh": "Heghlu'meH QaQ jajvam.", "en": "Today is a good day to die."},
-            {"tlh": "bortaS bIr jablu'DI' reH QaQqu' nay'.", "en": "Revenge is a dish best served cold."},
-            {"tlh": "qaStaHvIS wa' ram loS SaD Hugh SIjlaH qetbogh loD.", "en": "A running man can slit four thousand throats in one night."},
-            {"tlh": "Qu'vatlh!", "en": "Damn!"},
-            {"tlh": "nuqneH", "en": "What do you want?"},
-            {"tlh": "Qapla'!", "en": "Success!"},
-            {"tlh": "yIDoghQo'!", "en": "Don't be silly!"},
-            {"tlh": "wo' batlhvaD.", "en": "For the honor of the Empire."},
-            {"tlh": "DabuQlu'DI' yISuv.", "en": "When threatened, fight."},
-            {"tlh": "bIlujDI' yIchegh.", "en": "When you fail, return."},
-            {"tlh": "not lay'Ha' lulIjlaHbe'bogh.", "en": "What cannot be forgotten cannot be dishonored."},
-            {"tlh": "tIqDaq HoSna' tu'lu'.", "en": "Real strength is found in the heart."},
+            {"tlh": "Heghlu\'meH QaQ jajvam.", "en": "Today is a good day to die."},
+            {"tlh": "bortaS bIr jablu\'DI\' reH QaQqu\' nay\'.", "en": "Revenge is a dish best served cold."},
+            {"tlh": "Qu\'vatlh!", "en": "Damn!"},
+            {"tlh": "nuqneH.", "en": "What do you want?"},
+            {"tlh": "Qapla\'!", "en": "Success!"},
+            {"tlh": "yIDoghQo\'!", "en": "Don\'t be silly!"},
+            {"tlh": "wo\' batlhvaD.", "en": "For the honor of the Empire."},
+            {"tlh": "DabuQlu\'DI\' yISuv.", "en": "When threatened, fight."},
+            {"tlh": "bIlujDI\' yIchegh.", "en": "When you fail, return."},
+            {"tlh": "tIqDaq HoSna\' tu\'lu\'.", "en": "Real strength is found in the heart."},
+            {"tlh": "meQtaHbogh qachDaq Suv qoH neH.", "en": "Only a fool fights in a burning house."},
+            {"tlh": "taHjaj wo\'.", "en": "May the Empire endure."},
+            {"tlh": "tlhIngan maH!", "en": "We are Klingons!"},
+            {"tlh": "HIja\'.", "en": "Yes."},
+            {"tlh": "ghobe\'.", "en": "No."},
+            {"tlh": "nuqDaq \'oH puchpa\'\'e\'?", "en": "Where is the bathroom?"},
+            {"tlh": "jIyajbe\'.", "en": "I don\'t understand."},
+            {"tlh": "maj.", "en": "Good."},
+            {"tlh": "qatlho\'.", "en": "Thank you."},
+            {"tlh": "yIghoS!", "en": "Come here!"},
+            {"tlh": "qoSlIj DatIvjaj.", "en": "Happy birthday."},
         ]
         proverbs_file.parent.mkdir(parents=True, exist_ok=True)
-        proverbs_file.write_text(json.dumps(sample, indent=2, ensure_ascii=False), encoding="utf-8")
+        proverbs_file.write_text(
+            json.dumps(sample, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     data = json.loads(proverbs_file.read_text(encoding="utf-8"))
     print(f"Proverbs: loaded {len(data)} entries")
@@ -148,16 +252,16 @@ def build_dataset(
     all_pairs.extend(parse_boqwi())
     all_pairs.extend(load_proverbs())
 
-    # Deduplicate by (en, tlh) tuple
+    # Deduplicate by normalized (en, tlh) tuple
     seen = set()
     unique_pairs = []
     for pair in all_pairs:
-        key = (pair["en"].lower(), pair["tlh"].lower())
+        key = (pair["en"].lower().strip(), pair["tlh"].lower().strip())
         if key not in seen:
             seen.add(key)
             unique_pairs.append(pair)
 
-    print(f"Total unique pairs: {len(unique_pairs)}")
+    print(f"\nTotal unique pairs: {len(unique_pairs)}")
 
     # Shuffle and split
     random.seed(42)
@@ -185,6 +289,12 @@ def build_dataset(
 
 
 if __name__ == "__main__":
-    print("Building Klingon-English dataset...")
+    print("=" * 60)
+    print("Building Klingon-English dataset")
+    print("=" * 60 + "\n")
     splits = build_dataset()
-    print(f"\nDone! Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}")
+    total = sum(len(v) for v in splits.values())
+    print(f"\nDone! Total: {total} pairs")
+    print(f"  Train: {len(splits['train'])}")
+    print(f"  Val:   {len(splits['val'])}")
+    print(f"  Test:  {len(splits['test'])}")
