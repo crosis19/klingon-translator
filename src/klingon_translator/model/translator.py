@@ -12,15 +12,21 @@ from klingon_translator.utils.config import (
     MODELS_DIR,
 )
 
+# Default path for the extended (Klingon-ready) model
+EXTENDED_MODEL_DIR = MODELS_DIR / "nllb-klingon-extended"
+
 
 class KlingonTranslator:
     """English <-> Klingon translator using a fine-tuned NLLB-200 model.
 
     Usage:
-        translator = KlingonTranslator()  # loads base model
-        translator = KlingonTranslator("path/to/fine-tuned")  # loads fine-tuned model
+        # Load the extended (pre-fine-tuning) model
+        translator = KlingonTranslator()
 
-        result = translator.translate("Hello, world!", src_lang="eng_Latn", tgt_lang="tlh_Latn")
+        # Load a specific fine-tuned checkpoint
+        translator = KlingonTranslator("path/to/fine-tuned")
+
+        # Translate
         result = translator.to_klingon("Hello, world!")
         result = translator.to_english("nuqneH")
     """
@@ -28,17 +34,35 @@ class KlingonTranslator:
     def __init__(self, model_path: str | Path | None = None):
         """Load model and tokenizer.
 
+        Resolution order for model_path=None:
+        1. Extended model (models/nllb-klingon-extended) if it exists
+        2. Base NLLB-200 from Hugging Face (no Klingon support)
+
         Args:
-            model_path: Path to a fine-tuned model directory, or None to load the
-                base NLLB-200 model from Hugging Face (useful for testing the pipeline
-                before fine-tuning).
+            model_path: Path to a model directory, or None for auto-detection.
         """
-        model_id = str(model_path) if model_path else BASE_MODEL_ID
+        if model_path is not None:
+            model_id = str(model_path)
+            source = f"custom: {model_id}"
+        elif EXTENDED_MODEL_DIR.exists():
+            model_id = str(EXTENDED_MODEL_DIR)
+            source = f"extended: {EXTENDED_MODEL_DIR}"
+        else:
+            model_id = BASE_MODEL_ID
+            source = f"base: {BASE_MODEL_ID} (no Klingon support)"
+
+        print(f"Loading model ({source})...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
         self.model.eval()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
+        print(f"  Ready on {self.device} (vocab={len(self.tokenizer)})")
+
+    @property
+    def has_klingon(self) -> bool:
+        """Check if the loaded model supports Klingon translation."""
+        return KLINGON_CODE in self.tokenizer.get_vocab()
 
     def translate(
         self,
@@ -46,6 +70,7 @@ class KlingonTranslator:
         src_lang: str = ENGLISH_CODE,
         tgt_lang: str = KLINGON_CODE,
         max_length: int = 128,
+        num_beams: int = 5,
     ) -> str:
         """Translate a single string.
 
@@ -54,6 +79,7 @@ class KlingonTranslator:
             src_lang: Source language code (NLLB format).
             tgt_lang: Target language code (NLLB format).
             max_length: Maximum output token length.
+            num_beams: Beam search width (higher = better but slower).
 
         Returns:
             Translated text string.
@@ -69,6 +95,7 @@ class KlingonTranslator:
                 **inputs,
                 forced_bos_token_id=tgt_lang_id,
                 max_length=max_length,
+                num_beams=num_beams,
             )
 
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -79,6 +106,7 @@ class KlingonTranslator:
         src_lang: str = ENGLISH_CODE,
         tgt_lang: str = KLINGON_CODE,
         max_length: int = 128,
+        num_beams: int = 5,
     ) -> list[str]:
         """Translate a batch of strings.
 
@@ -87,6 +115,7 @@ class KlingonTranslator:
             src_lang: Source language code.
             tgt_lang: Target language code.
             max_length: Maximum output token length.
+            num_beams: Beam search width.
 
         Returns:
             List of translated strings.
@@ -102,17 +131,18 @@ class KlingonTranslator:
                 **inputs,
                 forced_bos_token_id=tgt_lang_id,
                 max_length=max_length,
+                num_beams=num_beams,
             )
 
         return self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-    def to_klingon(self, text: str) -> str:
+    def to_klingon(self, text: str, **kwargs) -> str:
         """Shortcut: translate English to Klingon."""
-        return self.translate(text, src_lang=ENGLISH_CODE, tgt_lang=KLINGON_CODE)
+        return self.translate(text, src_lang=ENGLISH_CODE, tgt_lang=KLINGON_CODE, **kwargs)
 
-    def to_english(self, text: str) -> str:
+    def to_english(self, text: str, **kwargs) -> str:
         """Shortcut: translate Klingon to English."""
-        return self.translate(text, src_lang=KLINGON_CODE, tgt_lang=ENGLISH_CODE)
+        return self.translate(text, src_lang=KLINGON_CODE, tgt_lang=ENGLISH_CODE, **kwargs)
 
     def save(self, path: str | Path | None = None) -> Path:
         """Save model and tokenizer to disk.
@@ -127,14 +157,22 @@ class KlingonTranslator:
         save_dir.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)
+        print(f"Saved model to: {save_dir}")
         return save_dir
 
 
 if __name__ == "__main__":
-    # Quick test with base model (won't produce real Klingon, but validates the pipeline)
-    print("Loading base NLLB-200 model (this may take a minute)...")
-    t = KlingonTranslator()
-    print(f"Model loaded on {t.device}")
-    result = t.translate("Hello, how are you?", tgt_lang="fra_Latn")
-    print(f"English -> French (sanity check): {result}")
-    print("Pipeline works! Fine-tuning needed for Klingon support.")
+    translator = KlingonTranslator()
+
+    if translator.has_klingon:
+        print("\nKlingon support detected! Testing translation...")
+        result = translator.to_klingon("Hello, how are you?")
+        print(f"  English -> Klingon: {result}")
+        result = translator.to_english("nuqneH")
+        print(f"  Klingon -> English: {result}")
+    else:
+        print("\nNo Klingon support (base model). Testing with French...")
+        result = translator.translate("Hello, how are you?", tgt_lang="fra_Latn")
+        print(f"  English -> French: {result}")
+        print("\nRun tokenizer extension first:")
+        print("  python -m klingon_translator.model.tokenizer")
