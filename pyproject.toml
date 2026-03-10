@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klingon-translator"
+version = "0.1.0"
+description = "English <-> Klingon machine translation using fine-tuned NLLB-200"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "transformers>=4.38.0",
+    "sentencepiece",
+    "datasets",
+    "sacrebleu",
+    "accelerate",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "ruff"]
+app = ["gradio"]
+data = ["opustools", "lxml"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

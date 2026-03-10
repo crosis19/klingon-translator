@@ -1,0 +1,25 @@
+name: klingon
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pytorch
+  - cpuonly
+  - pip
+  - jupyter
+  - ipywidgets
+  - pytest
+  - black
+  - ruff
+  - pip:
+      - transformers>=4.38.0
+      - sentencepiece
+      - datasets
+      - opustools
+      - lxml
+      - gradio
+      - sacrebleu
+      - accelerate
+      - protobuf
