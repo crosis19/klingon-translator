@@ -195,7 +195,7 @@ def extend_nllb_tokenizer(
     # controlling translation direction via forced_bos_token_id
     lang_code_added = False
     if KLINGON_CODE not in existing_vocab:
-        current_special = tokenizer.additional_special_tokens
+        current_special = tokenizer.special_tokens_map.get("additional_special_tokens", [])
         if KLINGON_CODE not in current_special:
             tokenizer.add_special_tokens(
                 {"additional_special_tokens": current_special + [KLINGON_CODE]}
