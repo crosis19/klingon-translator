@@ -14,12 +14,13 @@ dependencies = [
     "datasets",
     "sacrebleu",
     "accelerate",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "black", "ruff"]
 app = ["gradio"]
-data = ["opustools", "lxml"]
+data = ["pyyaml", "lxml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

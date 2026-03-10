@@ -41,10 +41,18 @@ def test_ensure_dirs():
 
 
 def test_translator_class_importable():
-    """Verify KlingonTranslator can be imported (doesn't load model)."""
+    """Verify KlingonTranslator can be imported (doesn\'t load model)."""
     from klingon_translator.model.translator import KlingonTranslator
 
     assert KlingonTranslator is not None
+
+
+def test_translator_has_extended_model_dir():
+    """Verify EXTENDED_MODEL_DIR is defined."""
+    from klingon_translator.model.translator import EXTENDED_MODEL_DIR
+
+    assert EXTENDED_MODEL_DIR is not None
+    assert "nllb-klingon-extended" in str(EXTENDED_MODEL_DIR)
 
 
 def test_data_module_importable():
@@ -64,7 +72,8 @@ def test_tokenizer_module_importable():
     from klingon_translator.model.tokenizer import (
         collect_klingon_text,
         extend_nllb_tokenizer,
+        run_pipeline,
         train_klingon_spm,
     )
 
-    assert all(callable(f) for f in [collect_klingon_text, train_klingon_spm, extend_nllb_tokenizer])
+    assert all(callable(f) for f in [collect_klingon_text, train_klingon_spm, extend_nllb_tokenizer, run_pipeline])
