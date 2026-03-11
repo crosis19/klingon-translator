@@ -4,7 +4,7 @@ Since NLLB doesn't include Klingon, we need to:
 1. Train a SentencePiece model on available Klingon text
 2. Merge new Klingon subword tokens into NLLB's tokenizer
 3. Register the tlh_Latn language code
-4. Initialize new token embeddings from English embeddings (transfer learning)
+4. Initialize new token embeddings via base-tokenizer decomposition (transfer learning)
 """
 
 import json
@@ -55,7 +55,7 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
     # Also collect from raw cached data for maximum coverage (default dir only)
     raw_dir = RAW_DATA_DIR
     if use_defaults and raw_dir.exists():
-        # Tatoeba cache
+        # Tatoeba API cache
         tatoeba_cache = raw_dir / "tatoeba_pairs.json"
         if tatoeba_cache.exists():
             pairs = json.loads(tatoeba_cache.read_text(encoding="utf-8"))
@@ -71,6 +71,24 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
                 if p.get("tlh", "").strip():
                     lines.append(p["tlh"].strip())
 
+        # OPUS Moses Klingon file (one sentence per line)
+        opus_tlh = raw_dir / "opus" / "tatoeba" / "Tatoeba.en-tlh.tlh"
+        if opus_tlh.exists():
+            for line in opus_tlh.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    lines.append(line)
+
+        # paq'batlh pairs
+        paqbatlh_cache = raw_dir / "paqbatlh_pairs.json"
+        if paqbatlh_cache.exists():
+            paq_pairs = json.loads(
+                paqbatlh_cache.read_text(encoding="utf-8")
+            )
+            for pair in paq_pairs:
+                if pair.get("tlh", "").strip():
+                    lines.append(pair["tlh"].strip())
+
     # Deduplicate while preserving order
     seen = set()
     unique_lines = []
@@ -85,7 +103,7 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
 def train_klingon_spm(
     klingon_text: str,
     output_dir: Path | None = None,
-    vocab_size: int = 1000,
+    vocab_size: int | None = None,
 ) -> Path:
     """Train a SentencePiece model on Klingon text.
 
@@ -96,6 +114,7 @@ def train_klingon_spm(
         klingon_text: Klingon text corpus (one sentence per line).
         output_dir: Where to save the SPM model.
         vocab_size: Target vocabulary size for Klingon subwords.
+            If None, auto-scales based on corpus size (1000-4000).
 
     Returns:
         Path to the trained .model file.
@@ -108,16 +127,28 @@ def train_klingon_spm(
     text_file.write_text(klingon_text, encoding="utf-8")
 
     num_lines = len(klingon_text.splitlines())
+
+    # Auto-scale vocab_size based on corpus size if not specified
+    if vocab_size is None:
+        num_unique = len(set(klingon_text.splitlines()))
+        vocab_size = min(4000, max(1000, num_unique // 5))
+        print(f"  Auto vocab_size: {vocab_size} (from {num_unique} unique sentences)")
+
     print(f"Training SentencePiece on {num_lines} Klingon sentences...")
 
     # Cap vocab_size for small corpora. SentencePiece needs enough data
     # to create the requested number of subword merges.
-    # Heuristic: unique chars + some merges, capped to available data
+    # byte_fallback=True reserves 256 byte tokens + 4 control + 1 user symbol
+    BYTE_FALLBACK_OVERHEAD = 261  # 256 bytes + <unk> <s> </s> <pad> + apostrophe
     unique_chars = len(set(klingon_text.replace("\n", "")))
+    min_required = BYTE_FALLBACK_OVERHEAD + unique_chars
     max_feasible = unique_chars + num_lines  # conservative upper bound
-    effective_vocab = min(vocab_size, max(32, max_feasible))
+    effective_vocab = min(vocab_size, max(min_required, max_feasible))
     if effective_vocab != vocab_size:
-        print(f"  Adjusted vocab_size: {vocab_size} -> {effective_vocab} (small corpus)")
+        print(
+            f"  Adjusted vocab_size: {vocab_size} -> {effective_vocab}"
+            " (small corpus)"
+        )
 
     model_prefix = output_dir / "klingon_spm"
     spm.SentencePieceTrainer.train(
@@ -129,6 +160,9 @@ def train_klingon_spm(
         num_threads=4,
         pad_id=3,  # Match NLLB convention
         hard_vocab_limit=False,  # Allow smaller vocab if not enough data
+        byte_fallback=True,  # Unknown chars -> bytes instead of <unk>
+        split_digits=True,  # Digits handled individually
+        user_defined_symbols=["'"],  # Apostrophe is atomic (central to Klingon)
     )
 
     model_path = Path(f"{model_prefix}.model")
@@ -149,9 +183,9 @@ def extend_nllb_tokenizer(
     Steps:
     1. Load the base NLLB-200 model and tokenizer
     2. Load the trained Klingon SentencePiece vocabulary
-    3. Add new Klingon subword tokens to the NLLB tokenizer
-    4. Register tlh_Latn as a new language code
-    5. Resize model embeddings and initialize new tokens from English
+    3. Pre-compute embeddings for new tokens via base-tokenizer decomposition
+    4. Add new Klingon subword tokens + tlh_Latn language code
+    5. Resize model embeddings and initialize from pre-computed values
     6. Save the extended model
 
     Args:
@@ -190,12 +224,42 @@ def extend_nllb_tokenizer(
 
     print(f"  New Klingon tokens to add: {len(new_tokens)}")
 
+    # ── Pre-compute embeddings BEFORE modifying tokenizer ────────────
+    # For each new token, tokenize it with the original NLLB tokenizer
+    # (which splits it into existing subwords) and average those embeddings.
+    # This gives a semantically meaningful initialization instead of the
+    # global mean embedding.
+    old_emb_size = model.get_input_embeddings().weight.shape[0]
+    token_init_map = {}  # token_string -> (input_emb_vec, output_emb_vec)
+
+    with torch.no_grad():
+        input_emb = model.get_input_embeddings().weight
+        output_emb = model.get_output_embeddings().weight
+        mean_input_emb = input_emb[:old_emb_size].mean(dim=0)
+        mean_output_emb = output_emb[:old_emb_size].mean(dim=0)
+
+        for token in new_tokens:
+            # Tokenize the new token's surface form with the ORIGINAL tokenizer
+            base_ids = tokenizer.encode(token, add_special_tokens=False)
+            if base_ids:
+                avg_input = input_emb[base_ids].mean(dim=0)
+                avg_output = output_emb[base_ids].mean(dim=0)
+            else:
+                # Fallback: global mean if somehow empty
+                avg_input = mean_input_emb
+                avg_output = mean_output_emb
+            token_init_map[token] = (avg_input.clone(), avg_output.clone())
+
+    print(f"  Pre-computed embeddings for {len(token_init_map)} new tokens")
+
+    # ── Now modify the tokenizer ─────────────────────────────────────
+
     # Register the Klingon language code as a special token
-    # NLLB uses language codes like "eng_Latn" as special tokens for
-    # controlling translation direction via forced_bos_token_id
     lang_code_added = False
     if KLINGON_CODE not in existing_vocab:
-        current_special = tokenizer.special_tokens_map.get("additional_special_tokens", [])
+        current_special = tokenizer.special_tokens_map.get(
+            "additional_special_tokens", []
+        )
         if KLINGON_CODE not in current_special:
             tokenizer.add_special_tokens(
                 {"additional_special_tokens": current_special + [KLINGON_CODE]}
@@ -215,13 +279,13 @@ def extend_nllb_tokenizer(
         model.save_pretrained(output_dir)
         return tokenizer, model
 
-    # Resize model embeddings to match new vocabulary size
-    old_emb_size = model.get_input_embeddings().weight.shape[0]
+    # ── Resize embeddings and initialize ─────────────────────────────
+
     model.resize_token_embeddings(len(tokenizer))
     new_emb_size = model.get_input_embeddings().weight.shape[0]
     print(f"  Resized embeddings: {old_emb_size} -> {new_emb_size}")
 
-    # Initialize new embeddings via transfer learning from English
+    # Initialize new embeddings via transfer learning
     if new_emb_size > old_emb_size:
         eng_id = tokenizer.convert_tokens_to_ids(ENGLISH_CODE)
         tlh_id = tokenizer.convert_tokens_to_ids(KLINGON_CODE)
@@ -230,25 +294,26 @@ def extend_nllb_tokenizer(
             input_emb = model.get_input_embeddings().weight
             output_emb = model.get_output_embeddings().weight
 
-            # Compute mean embedding from all original tokens for initializing
-            # new subword tokens (a reasonable prior)
-            mean_input_emb = input_emb[:old_emb_size].mean(dim=0)
-            mean_output_emb = output_emb[:old_emb_size].mean(dim=0)
-
             for i in range(old_emb_size, new_emb_size):
                 if i == tlh_id:
                     # Initialize Klingon language code from English language code
-                    # (closest semantic proxy for a new language)
                     input_emb[i] = input_emb[eng_id].clone()
                     output_emb[i] = output_emb[eng_id].clone()
                 else:
-                    # Initialize new subword tokens with mean embedding
-                    input_emb[i] = mean_input_emb.clone()
-                    output_emb[i] = mean_output_emb.clone()
+                    # Look up pre-computed embedding for this token
+                    token_str = tokenizer.convert_ids_to_tokens(i)
+                    if token_str in token_init_map:
+                        init_input, init_output = token_init_map[token_str]
+                        input_emb[i] = init_input
+                        output_emb[i] = init_output
+                    else:
+                        # Fallback for any token not in our map
+                        input_emb[i] = mean_input_emb.clone()
+                        output_emb[i] = mean_output_emb.clone()
 
         print(f"  Initialized {new_emb_size - old_emb_size} new embeddings")
         print(f"    Klingon lang code (id={tlh_id}) <- English (id={eng_id})")
-        print(f"    Other tokens <- mean embedding")
+        print("    Other tokens <- per-token base-tokenizer decomposition")
 
     # Save extended model and tokenizer
     tokenizer.save_pretrained(output_dir)
@@ -262,16 +327,114 @@ def extend_nllb_tokenizer(
     decoded = tokenizer.decode(encoded["input_ids"], skip_special_tokens=True)
     print(f"  Decoded back: '{decoded}'")
 
+    # Quality report
+    klingon_spm_token_count = sum(
+        1 for i in range(klingon_spm.get_piece_size())
+        if not (
+            klingon_spm.id_to_piece(i).startswith("<")
+            and klingon_spm.id_to_piece(i).endswith(">")
+        )
+    )
+    corpus_file = spm_model_path.parent / "klingon_corpus.txt"
+    if corpus_file.exists():
+        klingon_text = corpus_file.read_text(encoding="utf-8")
+        report_tokenizer_quality(
+            tokenizer,
+            klingon_text,
+            num_new_tokens=num_added,
+            klingon_spm_vocab_size=klingon_spm_token_count,
+        )
+
     return tokenizer, model
 
 
-def run_pipeline(vocab_size: int = 1000) -> tuple:
+def report_tokenizer_quality(
+    tokenizer: NllbTokenizerFast,
+    klingon_text: str,
+    num_new_tokens: int | None = None,
+    klingon_spm_vocab_size: int | None = None,
+) -> dict:
+    """Compute and print tokenizer quality metrics on Klingon text.
+
+    Metrics:
+        - Fertility: avg subword tokens per whitespace word (lower = better)
+        - Coverage: % of Klingon SPM vocab that was new vs already in NLLB
+        - Sample tokenizations of representative Klingon phrases
+
+    Args:
+        tokenizer: The extended NLLB tokenizer.
+        klingon_text: Klingon corpus text (one sentence per line).
+        num_new_tokens: Number of new tokens added (for coverage calc).
+        klingon_spm_vocab_size: Total Klingon SPM vocab size (non-control tokens).
+
+    Returns:
+        Dict with keys "fertility", "coverage_pct", "sample_tokenizations".
+    """
+    print("\n" + "=" * 60)
+    print("Tokenizer Quality Report")
+    print("=" * 60)
+
+    # ── Fertility ────────────────────────────────────────────────────
+    sentences = [s.strip() for s in klingon_text.splitlines() if s.strip()]
+    total_words = 0
+    total_tokens = 0
+    for sent in sentences:
+        words = sent.split()
+        total_words += len(words)
+        token_ids = tokenizer.encode(sent, add_special_tokens=False)
+        total_tokens += len(token_ids)
+
+    fertility = total_tokens / total_words if total_words > 0 else 0.0
+    print(f"\nFertility: {fertility:.2f} tokens/word")
+    print(
+        f"  ({total_tokens:,} tokens for {total_words:,} words "
+        f"across {len(sentences):,} sentences)"
+    )
+
+    # ── Coverage ─────────────────────────────────────────────────────
+    coverage_pct = None
+    if num_new_tokens is not None and klingon_spm_vocab_size is not None:
+        already_in_nllb = klingon_spm_vocab_size - num_new_tokens
+        coverage_pct = (num_new_tokens / klingon_spm_vocab_size) * 100
+        print("\nVocab coverage:")
+        print(f"  Klingon SPM vocab: {klingon_spm_vocab_size}")
+        print(f"  New tokens added:  {num_new_tokens} ({coverage_pct:.1f}%)")
+        print(
+            f"  Already in NLLB:   {already_in_nllb} "
+            f"({100 - coverage_pct:.1f}%)"
+        )
+
+    # ── Sample tokenizations ─────────────────────────────────────────
+    sample_phrases = [
+        "Qapla'",
+        "tlhIngan maH",
+        "nuqneH",
+        "bortaS bIr jablu'DI' reH QaQqu' nay'",
+        "Heghlu'meH QaQ jajvam",
+        "DabuQlu'DI' yISuv",
+    ]
+    print("\nSample tokenizations:")
+    for phrase in sample_phrases:
+        ids = tokenizer.encode(phrase, add_special_tokens=False)
+        tokens = tokenizer.convert_ids_to_tokens(ids)
+        print(f"  {phrase}")
+        print(f"    -> {tokens} ({len(tokens)} tokens)")
+
+    return {
+        "fertility": fertility,
+        "coverage_pct": coverage_pct,
+        "sample_tokenizations": sample_phrases,
+    }
+
+
+def run_pipeline(vocab_size: int | None = None) -> tuple:
     """Run the complete tokenizer extension pipeline.
 
     Convenience function that chains collect -> train -> extend.
 
     Args:
         vocab_size: Target Klingon vocabulary size.
+            If None, auto-scales based on corpus size (1000-4000).
 
     Returns:
         Tuple of (extended_tokenizer, extended_model).

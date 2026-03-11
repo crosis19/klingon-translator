@@ -1,7 +1,5 @@
 """Basic smoke tests for the klingon_translator package."""
 
-import pytest
-
 from klingon_translator.utils.config import (
     BASE_MODEL_ID,
     DATA_DIR,
@@ -84,6 +82,7 @@ def test_tokenizer_module_importable():
     from klingon_translator.model.tokenizer import (
         collect_klingon_text,
         extend_nllb_tokenizer,
+        report_tokenizer_quality,
         run_pipeline,
         train_klingon_spm,
     )
@@ -94,6 +93,7 @@ def test_tokenizer_module_importable():
             collect_klingon_text,
             train_klingon_spm,
             extend_nllb_tokenizer,
+            report_tokenizer_quality,
             run_pipeline,
         ]
     )
