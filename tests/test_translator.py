@@ -56,15 +56,27 @@ def test_translator_has_extended_model_dir():
 
 
 def test_data_module_importable():
-    """Verify data module can be imported."""
+    """Verify data module can be imported with all functions."""
     from klingon_translator.data.download import (
         build_dataset,
         download_tatoeba,
+        load_opus_tatoeba,
+        load_paqbatlh,
         load_proverbs,
         parse_boqwi,
     )
 
-    assert all(callable(f) for f in [download_tatoeba, parse_boqwi, load_proverbs, build_dataset])
+    assert all(
+        callable(f)
+        for f in [
+            download_tatoeba,
+            load_opus_tatoeba,
+            load_paqbatlh,
+            parse_boqwi,
+            load_proverbs,
+            build_dataset,
+        ]
+    )
 
 
 def test_tokenizer_module_importable():
@@ -76,4 +88,12 @@ def test_tokenizer_module_importable():
         train_klingon_spm,
     )
 
-    assert all(callable(f) for f in [collect_klingon_text, train_klingon_spm, extend_nllb_tokenizer, run_pipeline])
+    assert all(
+        callable(f)
+        for f in [
+            collect_klingon_text,
+            train_klingon_spm,
+            extend_nllb_tokenizer,
+            run_pipeline,
+        ]
+    )
