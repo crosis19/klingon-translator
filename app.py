@@ -1,12 +1,10 @@
 import gradio as gr
 
 from klingon_translator.model.translator import KlingonTranslator
-from klingon_translator.utils.config import MODELS_DIR
 
-# Load model once at startup
-FINE_TUNED_DIR = MODELS_DIR / "fine-tuned"
-model_path = FINE_TUNED_DIR if FINE_TUNED_DIR.exists() else None
-translator = KlingonTranslator(model_path)
+# Load model once at startup (auto-detects models/nllb-klingon-extended,
+# then falls back to base NLLB-200)
+translator = KlingonTranslator()
 
 
 def translate(text: str, direction: str) -> str:
