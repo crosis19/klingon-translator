@@ -1,9 +1,11 @@
 """Data acquisition and preprocessing for Klingon-English parallel corpus.
 
 Data sources:
-    1. Tatoeba: Community-translated sentence pairs via tatoeba.org API
-    2. boQwI' dictionary: YAML entries from De7vID/klingon-assistant-data
-    3. Curated proverbs: Hand-collected Klingon sayings with translations
+    1. Tatoeba API: Community-translated sentence pairs via tatoeba.org
+    2. OPUS Tatoeba: Larger parallel corpus from OPUS project (Moses format)
+    3. boQwI' dictionary: YAML entries from De7vID/klingon-assistant-data
+    4. paq'batlh: Klingon epic poem, bilingual edition (CC BY-NC-SA 4.0)
+    5. Curated proverbs: Hand-collected Klingon sayings with translations
 """
 
 import json
@@ -49,10 +51,10 @@ def download_tatoeba(max_pages: int = 100) -> list[dict[str, str]]:
     # Use cached data if available
     if cache_file.exists():
         pairs = json.loads(cache_file.read_text(encoding="utf-8"))
-        print(f"Tatoeba: loaded {len(pairs)} cached pairs")
+        print(f"Tatoeba API: loaded {len(pairs)} cached pairs")
         return pairs
 
-    print("Tatoeba: downloading from API (this may take a few minutes)...")
+    print("Tatoeba API: downloading from API (this may take a few minutes)...")
     pairs = []
     base_url = "https://tatoeba.org/en/api_v0/search?from=tlh&to=eng&query=&page={}"
 
@@ -102,7 +104,95 @@ def download_tatoeba(max_pages: int = 100) -> list[dict[str, str]]:
         json.dumps(pairs, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    print(f"Tatoeba: downloaded {len(pairs)} sentence pairs")
+    print(f"Tatoeba API: downloaded {len(pairs)} sentence pairs")
+    return pairs
+
+
+def load_opus_tatoeba() -> list[dict[str, str]]:
+    """Load Klingon-English pairs from OPUS Tatoeba corpus (Moses format).
+
+    Expects parallel files at:
+        data/raw/opus/tatoeba/Tatoeba.en-tlh.en
+        data/raw/opus/tatoeba/Tatoeba.en-tlh.tlh
+
+    These can be downloaded from: https://opus.nlpl.eu/Tatoeba/en&tlh/v2023-04-12/moses
+    The OPUS corpus contains a larger set of Tatoeba pairs than the API.
+
+    Returns:
+        List of {"en": ..., "tlh": ...} dicts.
+    """
+    opus_dir = RAW_DATA_DIR / "opus" / "tatoeba"
+    en_file = opus_dir / "Tatoeba.en-tlh.en"
+    tlh_file = opus_dir / "Tatoeba.en-tlh.tlh"
+
+    if not en_file.exists() or not tlh_file.exists():
+        print(f"OPUS Tatoeba: files not found at {opus_dir}")
+        print("  Download from: https://opus.nlpl.eu/Tatoeba/en&tlh/v2023-04-12/moses")
+        return []
+
+    en_lines = en_file.read_text(encoding="utf-8").strip().splitlines()
+    tlh_lines = tlh_file.read_text(encoding="utf-8").strip().splitlines()
+
+    if len(en_lines) != len(tlh_lines):
+        print(f"OPUS Tatoeba: line count mismatch ({len(en_lines)} en vs {len(tlh_lines)} tlh)")
+        # Use the shorter count
+        count = min(len(en_lines), len(tlh_lines))
+        en_lines = en_lines[:count]
+        tlh_lines = tlh_lines[:count]
+
+    pairs = []
+    skipped = 0
+    for en, tlh in zip(en_lines, tlh_lines):
+        en = en.strip()
+        tlh = tlh.strip()
+        if en and tlh:
+            # Sanity check: skip if both sides are identical (mislabeled data)
+            if en.lower() == tlh.lower():
+                skipped += 1
+                continue
+            pairs.append({"en": en, "tlh": tlh})
+
+    if skipped:
+        print(f"  (skipped {skipped} identical-on-both-sides entries)")
+    print(f"OPUS Tatoeba: loaded {len(pairs)} pairs")
+    return pairs
+
+
+def load_paqbatlh() -> list[dict[str, str]]:
+    """Load English-Klingon pairs from paq'batlh (Klingon epic poem).
+
+    The paq'batlh is a bilingual edition of the Klingon Book of Honor,
+    published under CC BY-NC-SA 4.0 license. Pairs are extracted at the
+    verse-line level where alignment is perfect, and at the canto level
+    for sections with formatting irregularities.
+
+    Expects pre-parsed data at:
+        data/raw/paqbatlh_pairs.json
+
+    To regenerate, run the standalone parser script with pymupdf:
+        python _parse_paqbatlh.py
+
+    Returns:
+        List of {"en": ..., "tlh": ...} dicts.
+    """
+    pairs_file = RAW_DATA_DIR / "paqbatlh_pairs.json"
+
+    if not pairs_file.exists():
+        print(f"paq'batlh: pre-parsed file not found at {pairs_file}")
+        print("  Run the parser: python _parse_paqbatlh.py")
+        return []
+
+    raw_pairs = json.loads(pairs_file.read_text(encoding="utf-8"))
+
+    # Convert to standard format and add source tag
+    pairs = []
+    for p in raw_pairs:
+        en = p.get("en", "").strip()
+        tlh = p.get("tlh", "").strip()
+        if en and tlh:
+            pairs.append({"en": en, "tlh": tlh})
+
+    print(f"paq'batlh: loaded {len(pairs)} pairs")
     return pairs
 
 
@@ -241,16 +331,38 @@ def build_dataset(
 ) -> dict[str, list[dict[str, str]]]:
     """Combine all data sources, deduplicate, and split into train/val/test.
 
+    Sources are loaded in order, with deduplication based on the normalized
+    (en, tlh) text pair. The OPUS Tatoeba corpus provides the bulk of data,
+    supplemented by the Tatoeba API, boQwI' dictionary, paq'batlh epic poem,
+    and curated proverbs.
+
     Returns:
         Dict with keys "train", "val", "test", each a list of {"en", "tlh"} dicts.
     """
     ensure_dirs()
 
     # Collect from all sources
+    print("Collecting data from all sources...\n")
     all_pairs = []
-    all_pairs.extend(download_tatoeba())
-    all_pairs.extend(parse_boqwi())
-    all_pairs.extend(load_proverbs())
+
+    sources = [
+        ("OPUS Tatoeba", load_opus_tatoeba),
+        ("Tatoeba API", download_tatoeba),
+        ("boQwI' dictionary", parse_boqwi),
+        ("paq'batlh", load_paqbatlh),
+        ("Proverbs", load_proverbs),
+    ]
+
+    source_counts = {}
+    for name, loader in sources:
+        pairs = loader()
+        source_counts[name] = len(pairs)
+        all_pairs.extend(pairs)
+        print()
+
+    print(f"Raw total: {len(all_pairs)} pairs from {len(sources)} sources")
+    for name, count in source_counts.items():
+        print(f"  {name}: {count}")
 
     # Deduplicate by normalized (en, tlh) tuple
     seen = set()
@@ -261,7 +373,8 @@ def build_dataset(
             seen.add(key)
             unique_pairs.append(pair)
 
-    print(f"\nTotal unique pairs: {len(unique_pairs)}")
+    dupes = len(all_pairs) - len(unique_pairs)
+    print(f"\nAfter deduplication: {len(unique_pairs)} unique pairs ({dupes} duplicates removed)")
 
     # Shuffle and split
     random.seed(42)
