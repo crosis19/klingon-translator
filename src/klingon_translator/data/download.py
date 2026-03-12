@@ -8,12 +8,14 @@ Data sources:
     5. Curated proverbs: Hand-collected Klingon sayings with translations
 """
 
+import glob
 import json
 import random
 import re
 import ssl
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -196,10 +198,52 @@ def load_paqbatlh() -> list[dict[str, str]]:
     return pairs
 
 
-def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
-    """Parse boQwI\' Klingon dictionary YAML data for parallel entries.
+def _parse_boqwi_xml(base_dir: Path) -> list[dict[str, str]]:
+    """Parse boQwI' XML files for sentence pairs.
 
-    Extracts:
+    The mem-*.xml files contain sentence entries with entry_name (Klingon)
+    and definition (English) columns. Some sentence pairs only appear in
+    the XML files and not in the YAML entries.
+
+    Args:
+        base_dir: Path to klingon-assistant-data-main/ directory.
+
+    Returns:
+        List of {"en": ..., "tlh": ...} dicts.
+    """
+    xml_pattern = str(base_dir / "mem-*.xml")
+    xml_files = sorted(glob.glob(xml_pattern))
+    if not xml_files:
+        return []
+
+    pairs = []
+    for xf in xml_files:
+        try:
+            with open(xf, encoding="utf-8") as f:
+                raw = f.read()
+            root = ET.fromstring("<root>" + raw + "</root>")
+        except (ET.ParseError, Exception):
+            continue
+
+        for table in root.findall(".//table"):
+            entry = {}
+            for col in table.findall("column"):
+                entry[col.get("name", "")] = (col.text or "").strip()
+
+            tlh = entry.get("entry_name", "")
+            en = entry.get("definition", "")
+            pos = entry.get("part_of_speech", "")
+
+            if tlh and en and pos.startswith("sen"):
+                pairs.append({"en": en, "tlh": tlh})
+
+    return pairs
+
+
+def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
+    """Parse boQwI' Klingon dictionary data for parallel entries.
+
+    Extracts from both YAML entries and XML files:
         - Word entries: Klingon word -> English definition
         - Sentence entries: Klingon sentence -> English translation
         - Example sentences embedded in entries
@@ -214,13 +258,14 @@ def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
         data_dir = RAW_DATA_DIR / "klingon-assistant-data-main" / "entries"
 
     if not data_dir.exists():
-        print(f"boQwI\' data not found at {data_dir}")
+        print(f"boQwI' data not found at {data_dir}")
         print("Download from: https://github.com/De7vID/klingon-assistant-data")
         return []
 
     pairs = []
     skipped = 0
 
+    # Parse YAML entries
     for yaml_file in sorted(data_dir.rglob("*.yaml")):
         try:
             with open(yaml_file, encoding="utf-8") as f:
@@ -232,7 +277,6 @@ def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
         if not data:
             continue
 
-        # Handle files with single entry or multiple entries
         entries = []
         if "entry" in data:
             entries.append(data["entry"])
@@ -245,7 +289,6 @@ def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
 
             tlh_name = entry.get("entry_name", "").strip()
 
-            # Get English definition
             definition = entry.get("definition", "")
             if isinstance(definition, dict):
                 en_text = definition.get("text", "").strip()
@@ -254,30 +297,104 @@ def parse_boqwi(data_dir: Path | None = None) -> list[dict[str, str]]:
             else:
                 en_text = ""
 
-            # Skip template entries (contain "...")
             if "..." in tlh_name or not tlh_name or not en_text:
                 continue
 
-            # Add pair
             pairs.append({"en": en_text, "tlh": tlh_name})
 
-            # Extract example sentences if available
             examples_text = entry.get("examples", "")
             if examples_text and isinstance(examples_text, str):
-                # Examples format: {klingon:sen:nolink} "English translation"
-                pattern = r'\{(.+?)(?::sen)?(?::nolink)?\}\s*["\u201c]([^"\u201d]+)["\u201d]'
+                pattern = (
+                    r'\{(.+?)(?::sen)?(?::nolink)?\}'
+                    r'\s*["\u201c]([^"\u201d]+)["\u201d]'
+                )
                 for match in re.finditer(pattern, examples_text):
                     ex_tlh = match.group(1).strip()
                     ex_en = match.group(2).strip()
-                    # Clean up cross-references
                     ex_tlh = re.sub(r":[a-z_:]+$", "", ex_tlh)
                     if ex_tlh and ex_en and "..." not in ex_tlh:
                         pairs.append({"en": ex_en, "tlh": ex_tlh})
 
+    yaml_count = len(pairs)
+
+    # Also parse XML files for sentence pairs not in YAML
+    xml_base = data_dir.parent  # klingon-assistant-data-main/
+    xml_pairs = _parse_boqwi_xml(xml_base)
+    if xml_pairs:
+        yaml_keys = {(p["tlh"].strip(), p["en"].strip()) for p in pairs}
+        new_xml = [
+            p
+            for p in xml_pairs
+            if (p["tlh"].strip(), p["en"].strip()) not in yaml_keys
+        ]
+        pairs.extend(new_xml)
+        if new_xml:
+            print(f"  ({len(new_xml)} additional pairs from XML files)")
+
     if skipped:
         print(f"  (skipped {skipped} unreadable files)")
-    print(f"boQwI\': parsed {len(pairs)} entries")
+    xml_count = len(pairs) - yaml_count
+    print(f"boQwI': parsed {len(pairs)} entries ({yaml_count} YAML + {xml_count} XML)")
     return pairs
+
+
+def extract_boqwi_monolingual(
+    data_dir: Path | None = None,
+) -> list[str]:
+    """Extract monolingual Klingon text from boQwI' for tokenizer training.
+
+    Collects all Klingon entry names from the YAML entries. This provides
+    broader Klingon text coverage for training the SentencePiece tokenizer,
+    beyond just the parallel corpus.
+
+    Args:
+        data_dir: Path to the klingon-assistant-data-main/entries/ directory.
+
+    Returns:
+        List of unique Klingon text strings.
+    """
+    if data_dir is None:
+        data_dir = RAW_DATA_DIR / "klingon-assistant-data-main" / "entries"
+
+    cache_file = RAW_DATA_DIR / "boqwi_monolingual.txt"
+
+    if cache_file.exists():
+        lines = [
+            line.strip()
+            for line in cache_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        print(f"boQwI' monolingual: loaded {len(lines)} cached lines")
+        return lines
+
+    if not data_dir.exists():
+        print(f"boQwI' data not found at {data_dir}")
+        return []
+
+    monolingual = []
+
+    for yaml_file in sorted(data_dir.rglob("*.yaml")):
+        try:
+            with open(yaml_file, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            continue
+
+        if not data or "entry" not in data:
+            continue
+
+        entry = data["entry"]
+        tlh = entry.get("entry_name", "").strip()
+
+        if tlh and not tlh.startswith("{"):
+            monolingual.append(tlh)
+
+    monolingual = list(dict.fromkeys(monolingual))
+
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text("\n".join(monolingual), encoding="utf-8")
+    print(f"boQwI' monolingual: extracted {len(monolingual)} lines")
+    return monolingual
 
 
 def load_proverbs() -> list[dict[str, str]]:
