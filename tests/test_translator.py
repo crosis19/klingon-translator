@@ -97,3 +97,46 @@ def test_tokenizer_module_importable():
             run_pipeline,
         ]
     )
+
+
+def test_training_modules_importable():
+    """Verify all training submodules can be imported."""
+    from klingon_translator.training.colab_utils import (
+        copy_data_to_local_ssd,
+        load_jsonl,
+    )
+    from klingon_translator.training.dataset import BilingualDataset
+    from klingon_translator.training.evaluate import (
+        DEFAULT_SAMPLE_PHRASES_EN,
+        DEFAULT_SAMPLE_PHRASES_TLH,
+        EvalScores,
+        SampleResult,
+        evaluate_test_set,
+        generate_training_report,
+        run_sample_translations,
+        translate_batch,
+    )
+    from klingon_translator.training.gpu import (
+        GPUConfig,
+        detect_gpu,
+        enable_tf32_if_available,
+        set_seed,
+    )
+    from klingon_translator.training.trainer import (
+        TrainingConfig,
+        build_trainer,
+        save_model,
+    )
+
+    assert all(
+        x is not None
+        for x in [
+            GPUConfig, detect_gpu, enable_tf32_if_available, set_seed,
+            BilingualDataset,
+            TrainingConfig, build_trainer, save_model,
+            EvalScores, SampleResult, evaluate_test_set,
+            generate_training_report, run_sample_translations, translate_batch,
+            DEFAULT_SAMPLE_PHRASES_EN, DEFAULT_SAMPLE_PHRASES_TLH,
+            copy_data_to_local_ssd, load_jsonl,
+        ]
+    )

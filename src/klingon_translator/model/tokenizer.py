@@ -12,6 +12,7 @@ from pathlib import Path
 
 import sentencepiece as spm
 import torch
+from tokenizers import Tokenizer as HFTokenizer
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizerFast
 
 from klingon_translator.utils.config import (
@@ -24,7 +25,10 @@ from klingon_translator.utils.config import (
 )
 
 
-def collect_klingon_text(data_dir: Path | None = None) -> str:
+def collect_klingon_text(
+    data_dir: Path | None = None,
+    raw_data_dir: Path | None = None,
+) -> str:
     """Collect all available Klingon text for tokenizer training.
 
     Gathers Klingon text from processed JSONL files. When using the default
@@ -33,6 +37,8 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
     Args:
         data_dir: Directory containing processed .jsonl files.
             If None, uses the default PROCESSED_DATA_DIR and also reads raw data.
+        raw_data_dir: Directory containing raw data files (OPUS, paq'batlh, etc.).
+            If None, uses the default RAW_DATA_DIR when data_dir is also None.
 
     Returns:
         Concatenated Klingon text, one sentence per line.
@@ -52,9 +58,10 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
                 if "tlh" in pair and pair["tlh"].strip():
                     lines.append(pair["tlh"].strip())
 
-    # Also collect from raw cached data for maximum coverage (default dir only)
-    raw_dir = RAW_DATA_DIR
-    if use_defaults and raw_dir.exists():
+    # Also collect from raw cached data for maximum coverage
+    raw_dir = raw_data_dir or RAW_DATA_DIR
+    use_raw = use_defaults or raw_data_dir is not None
+    if use_raw and raw_dir.exists():
         # Tatoeba API cache
         tatoeba_cache = raw_dir / "tatoeba_pairs.json"
         if tatoeba_cache.exists():
@@ -88,6 +95,17 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
             for pair in paq_pairs:
                 if pair.get("tlh", "").strip():
                     lines.append(pair["tlh"].strip())
+
+        # boQwI' monolingual Klingon data (dictionary entries,
+        # examples, notes — maximizes SPM coverage)
+        boqwi_mono = raw_dir / "boqwi_monolingual.txt"
+        if boqwi_mono.exists():
+            for line in boqwi_mono.read_text(
+                encoding="utf-8"
+            ).splitlines():
+                line = line.strip()
+                if line:
+                    lines.append(line)
 
     # Deduplicate while preserving order
     seen = set()
@@ -163,6 +181,10 @@ def train_klingon_spm(
         byte_fallback=True,  # Unknown chars -> bytes instead of <unk>
         split_digits=True,  # Digits handled individually
         user_defined_symbols=["'"],  # Apostrophe is atomic (central to Klingon)
+        normalization_rule_name="identity",  # No normalization (preserve Klingon orthography)
+        allow_whitespace_only_pieces=False,  # Prevent whitespace-only tokens
+        remove_extra_whitespaces=True,  # Clean up whitespace in training data
+        add_dummy_prefix=True,  # Match NLLB's ▁ prefix convention
     )
 
     model_path = Path(f"{model_prefix}.model")
@@ -174,6 +196,77 @@ def train_klingon_spm(
     return model_path
 
 
+def _add_tokens_to_bpe(
+    tokenizer: NllbTokenizerFast,
+    new_tokens: list[str],
+) -> int:
+    """Add tokens directly to the BPE model's vocab and merge rules.
+
+    Unlike ``tokenizer.add_tokens()``, this injects tokens into the
+    underlying BPE model so they participate in normal BPE merging.
+    ``add_tokens()`` creates "added tokens" that are matched on the
+    *raw* text before the Metaspace pre-tokenizer runs, which breaks
+    word-internal subword boundaries and causes spurious spaces
+    (e.g. ``Heghlu'meH`` → ``"Hegh lu'meH"``).
+
+    By adding directly to the BPE vocab + merges, the Metaspace
+    pre-tokenizer handles ``▁`` word boundaries correctly and
+    tokenization round-trips are preserved.
+
+    Args:
+        tokenizer: The NLLB fast tokenizer to modify in-place.
+        new_tokens: Tokens from the Klingon SPM that are not in
+            the base NLLB vocabulary.
+
+    Returns:
+        Number of tokens actually added.
+    """
+    tok_json = json.loads(tokenizer.backend_tokenizer.to_str())
+    vocab = tok_json["model"]["vocab"]
+    merges = tok_json["model"]["merges"]
+    existing_merges = set(tuple(m) for m in merges)
+
+    vocab_set = set(vocab.keys())
+    next_id = max(vocab.values()) + 1
+    num_added = 0
+
+    # Add each new token to the BPE vocabulary
+    for token in new_tokens:
+        if token not in vocab_set:
+            vocab[token] = next_id
+            next_id += 1
+            vocab_set.add(token)
+            num_added += 1
+
+    # Add merge rules so BPE can compose these tokens.
+    # For each multi-char token, find a split where both halves
+    # already exist in the vocabulary.
+    new_merges = []
+    for token in new_tokens:
+        if len(token) <= 1:
+            continue
+        for split_pos in range(1, len(token)):
+            left = token[:split_pos]
+            right = token[split_pos:]
+            if left in vocab_set and right in vocab_set:
+                pair = (left, right)
+                if pair not in existing_merges:
+                    new_merges.append([left, right])
+                    existing_merges.add(pair)
+                break
+
+    merges.extend(new_merges)
+
+    # Rebuild the backend tokenizer from modified JSON
+    tok_json["model"]["vocab"] = vocab
+    tok_json["model"]["merges"] = merges
+    tokenizer._tokenizer = HFTokenizer.from_str(
+        json.dumps(tok_json)
+    )
+
+    return num_added
+
+
 def extend_nllb_tokenizer(
     spm_model_path: Path,
     output_dir: Path | None = None,
@@ -183,13 +276,17 @@ def extend_nllb_tokenizer(
     Steps:
     1. Load the base NLLB-200 model and tokenizer
     2. Load the trained Klingon SentencePiece vocabulary
-    3. Pre-compute embeddings for new tokens via base-tokenizer decomposition
-    4. Add new Klingon subword tokens + tlh_Latn language code
-    5. Resize model embeddings and initialize from pre-computed values
-    6. Save the extended model
+    3. Pre-compute embeddings for new tokens via base-tokenizer
+       decomposition
+    4. Add Klingon subword tokens to the BPE model (not as "added
+       tokens") so that Metaspace word-boundary handling is preserved
+    5. Register the tlh_Latn language code as a special token
+    6. Resize model embeddings and initialize from pre-computed values
+    7. Save the extended model
 
     Args:
-        spm_model_path: Path to trained Klingon SentencePiece .model file.
+        spm_model_path: Path to trained Klingon SentencePiece .model
+            file.
         output_dir: Where to save the extended model.
 
     Returns:
@@ -205,18 +302,18 @@ def extend_nllb_tokenizer(
     model = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL_ID)
 
     print(f"  Base vocab size: {len(tokenizer)}")
-    print(f"  Model embedding size: {model.get_input_embeddings().weight.shape}")
+    emb_shape = model.get_input_embeddings().weight.shape
+    print(f"  Model embedding size: {emb_shape}")
 
     # Load trained Klingon SPM and get its vocabulary
     klingon_spm = spm.SentencePieceProcessor()
     klingon_spm.load(str(spm_model_path))
 
-    # Find tokens in Klingon SPM that aren't already in NLLB's vocabulary
+    # Find tokens in Klingon SPM not already in NLLB
     existing_vocab = set(tokenizer.get_vocab().keys())
     new_tokens = []
     for i in range(klingon_spm.get_piece_size()):
         token = klingon_spm.id_to_piece(i)
-        # Skip SPM control tokens (<unk>, <s>, </s>, <pad>)
         if token.startswith("<") and token.endswith(">"):
             continue
         if token not in existing_vocab:
@@ -224,37 +321,46 @@ def extend_nllb_tokenizer(
 
     print(f"  New Klingon tokens to add: {len(new_tokens)}")
 
-    # ── Pre-compute embeddings BEFORE modifying tokenizer ────────────
-    # For each new token, tokenize it with the original NLLB tokenizer
-    # (which splits it into existing subwords) and average those embeddings.
-    # This gives a semantically meaningful initialization instead of the
-    # global mean embedding.
+    # ── Pre-compute embeddings BEFORE modifying tokenizer ──────
+    # For each new token, tokenize it with the original NLLB
+    # tokenizer (which splits it into existing subwords) and
+    # average those embeddings for a meaningful initialization.
     old_emb_size = model.get_input_embeddings().weight.shape[0]
-    token_init_map = {}  # token_string -> (input_emb_vec, output_emb_vec)
+    token_init_map = {}
 
     with torch.no_grad():
         input_emb = model.get_input_embeddings().weight
         output_emb = model.get_output_embeddings().weight
-        mean_input_emb = input_emb[:old_emb_size].mean(dim=0)
-        mean_output_emb = output_emb[:old_emb_size].mean(dim=0)
+        mean_input = input_emb[:old_emb_size].mean(dim=0)
+        mean_output = output_emb[:old_emb_size].mean(dim=0)
 
         for token in new_tokens:
-            # Tokenize the new token's surface form with the ORIGINAL tokenizer
-            base_ids = tokenizer.encode(token, add_special_tokens=False)
+            base_ids = tokenizer.encode(
+                token, add_special_tokens=False
+            )
             if base_ids:
-                avg_input = input_emb[base_ids].mean(dim=0)
-                avg_output = output_emb[base_ids].mean(dim=0)
+                avg_in = input_emb[base_ids].mean(dim=0)
+                avg_out = output_emb[base_ids].mean(dim=0)
             else:
-                # Fallback: global mean if somehow empty
-                avg_input = mean_input_emb
-                avg_output = mean_output_emb
-            token_init_map[token] = (avg_input.clone(), avg_output.clone())
+                avg_in = mean_input
+                avg_out = mean_output
+            token_init_map[token] = (
+                avg_in.clone(),
+                avg_out.clone(),
+            )
 
-    print(f"  Pre-computed embeddings for {len(token_init_map)} new tokens")
+    print(
+        f"  Pre-computed embeddings for "
+        f"{len(token_init_map)} new tokens"
+    )
 
-    # ── Now modify the tokenizer ─────────────────────────────────────
+    # ── Add Klingon tokens to BPE model ────────────────────────
+    # Tokens are injected into the BPE vocab + merge rules rather
+    # than via add_tokens() to preserve Metaspace word boundaries.
+    num_added = _add_tokens_to_bpe(tokenizer, new_tokens)
+    print(f"  Added {num_added} tokens to BPE model")
 
-    # Register the Klingon language code as a special token
+    # ── Register Klingon language code ─────────────────────────
     lang_code_added = False
     if KLINGON_CODE not in existing_vocab:
         current_special = tokenizer.special_tokens_map.get(
@@ -262,30 +368,26 @@ def extend_nllb_tokenizer(
         )
         if KLINGON_CODE not in current_special:
             tokenizer.add_special_tokens(
-                {"additional_special_tokens": current_special + [KLINGON_CODE]}
+                {
+                    "additional_special_tokens": (
+                        current_special + [KLINGON_CODE]
+                    )
+                }
             )
             lang_code_added = True
             print(f"  Registered language code: {KLINGON_CODE}")
 
-    # Add new Klingon subword tokens
-    num_added = 0
-    if new_tokens:
-        num_added = tokenizer.add_tokens(new_tokens)
-        print(f"  Added {num_added} new tokens to tokenizer")
-
     if num_added == 0 and not lang_code_added:
-        print("  No new tokens needed - vocabulary already covers Klingon text")
+        print("  No new tokens needed")
         tokenizer.save_pretrained(output_dir)
         model.save_pretrained(output_dir)
         return tokenizer, model
 
-    # ── Resize embeddings and initialize ─────────────────────────────
-
+    # ── Resize embeddings and initialize ───────────────────────
     model.resize_token_embeddings(len(tokenizer))
     new_emb_size = model.get_input_embeddings().weight.shape[0]
     print(f"  Resized embeddings: {old_emb_size} -> {new_emb_size}")
 
-    # Initialize new embeddings via transfer learning
     if new_emb_size > old_emb_size:
         eng_id = tokenizer.convert_tokens_to_ids(ENGLISH_CODE)
         tlh_id = tokenizer.convert_tokens_to_ids(KLINGON_CODE)
@@ -296,40 +398,59 @@ def extend_nllb_tokenizer(
 
             for i in range(old_emb_size, new_emb_size):
                 if i == tlh_id:
-                    # Initialize Klingon language code from English language code
                     input_emb[i] = input_emb[eng_id].clone()
                     output_emb[i] = output_emb[eng_id].clone()
                 else:
-                    # Look up pre-computed embedding for this token
-                    token_str = tokenizer.convert_ids_to_tokens(i)
-                    if token_str in token_init_map:
-                        init_input, init_output = token_init_map[token_str]
-                        input_emb[i] = init_input
-                        output_emb[i] = init_output
+                    tok_str = tokenizer.convert_ids_to_tokens(i)
+                    if tok_str in token_init_map:
+                        ie, oe = token_init_map[tok_str]
+                        input_emb[i] = ie
+                        output_emb[i] = oe
                     else:
-                        # Fallback for any token not in our map
-                        input_emb[i] = mean_input_emb.clone()
-                        output_emb[i] = mean_output_emb.clone()
+                        input_emb[i] = mean_input.clone()
+                        output_emb[i] = mean_output.clone()
 
-        print(f"  Initialized {new_emb_size - old_emb_size} new embeddings")
-        print(f"    Klingon lang code (id={tlh_id}) <- English (id={eng_id})")
-        print("    Other tokens <- per-token base-tokenizer decomposition")
+        n_new = new_emb_size - old_emb_size
+        print(f"  Initialized {n_new} new embeddings")
+        print(
+            f"    tlh_Latn (id={tlh_id}) <- "
+            f"eng_Latn (id={eng_id})"
+        )
+        print("    Others <- base-tokenizer decomposition")
+
+    # ── Roundtrip verification ─────────────────────────────────
+    verify_phrases = [
+        "Heghlu'meH QaQ jajvam.",
+        "Qapla'!",
+        "nuqneH?",
+        "tlhIngan maH!",
+    ]
+    print("\n  Roundtrip verification:")
+    all_ok = True
+    for phrase in verify_phrases:
+        ids = tokenizer(phrase, add_special_tokens=False)[
+            "input_ids"
+        ]
+        decoded = tokenizer.decode(ids, skip_special_tokens=True)
+        ok = phrase == decoded.strip()
+        if not ok:
+            all_ok = False
+        status = "OK" if ok else "FAIL"
+        print(f"    [{status}] {phrase}")
+        if not ok:
+            print(f"           -> {decoded}")
+    if all_ok:
+        print("    All roundtrips passed!")
 
     # Save extended model and tokenizer
     tokenizer.save_pretrained(output_dir)
     model.save_pretrained(output_dir)
     print(f"\nSaved extended model to: {output_dir}")
 
-    # Quick verification
-    test_text = "Qapla'"
-    encoded = tokenizer(test_text)
-    print(f"\nVerification: '{test_text}' -> token IDs: {encoded['input_ids']}")
-    decoded = tokenizer.decode(encoded["input_ids"], skip_special_tokens=True)
-    print(f"  Decoded back: '{decoded}'")
-
     # Quality report
     klingon_spm_token_count = sum(
-        1 for i in range(klingon_spm.get_piece_size())
+        1
+        for i in range(klingon_spm.get_piece_size())
         if not (
             klingon_spm.id_to_piece(i).startswith("<")
             and klingon_spm.id_to_piece(i).endswith(">")
