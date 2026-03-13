@@ -8,7 +8,6 @@ from pathlib import Path
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from klingon_translator.model.translator import clean_translation
 from klingon_translator.utils.config import (
     BASE_MODEL_ID,
     ENGLISH_CODE,
@@ -117,10 +116,7 @@ def translate_batch(
         decoded = tokenizer.batch_decode(
             outputs, skip_special_tokens=True
         )
-        results.extend(
-            clean_translation(t, target_lang=tgt_lang)
-            for t in decoded
-        )
+        results.extend(decoded)
 
         if (i // batch_size) % 5 == 0:
             n = min(i + batch_size, len(texts))

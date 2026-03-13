@@ -1,6 +1,5 @@
 """Core KlingonTranslator class - the main interface for translation."""
 
-import re
 from pathlib import Path
 
 import torch
@@ -12,48 +11,6 @@ from klingon_translator.utils.config import (
     KLINGON_CODE,
     MODELS_DIR,
 )
-
-
-def clean_translation(text: str, target_lang: str = "") -> str:
-    """Post-process translated text to fix tokenizer spacing artifacts.
-
-    Subword tokenizers (especially extended ones) can introduce
-    spurious spaces when tokens from different vocabularies are
-    combined during decoding.  This function cleans up common
-    issues without altering the actual content.
-
-    Apostrophe rules are language-sensitive:
-    - **Klingon** (tlh_Latn): apostrophes always attach to adjacent
-      letters with no space (e.g. ``jablu'DI'``, ``Qapla'``).
-    - **English / other**: only spaces *before* apostrophes are
-      removed (``don 't`` → ``don't``), but spaces *after* are kept
-      so ``hasn't he`` stays correct.
-
-    Args:
-        text: Raw decoded translation string.
-        target_lang: NLLB language code of the output (e.g.
-            ``"tlh_Latn"``).  Used to select apostrophe rules.
-
-    Returns:
-        Cleaned translation string.
-    """
-    is_klingon = target_lang == KLINGON_CODE
-
-    # Collapse multiple spaces into one
-    text = re.sub(r" {2,}", " ", text)
-    # Remove spaces before apostrophes  (e.g. "Qapla '" -> "Qapla'")
-    text = re.sub(r" '", "'", text)
-    if is_klingon:
-        # Klingon: apostrophes always join to the next morpheme
-        # (e.g. "jablu' DI'" -> "jablu'DI'")
-        text = re.sub(r"' (?=[A-Za-z])", "'", text)
-    # Remove spaces before punctuation  (e.g. "nuqneH ?" -> "nuqneH?")
-    text = re.sub(r" ([?.!,;:])", r"\1", text)
-    # Remove spaces after opening quotes/parens
-    text = re.sub(r'(["\(]) ', r"\1", text)
-    # Remove spaces before closing quotes/parens
-    text = re.sub(r' (["\)])', r"\1", text)
-    return text.strip()
 
 # Default path for the extended (Klingon-ready) model
 EXTENDED_MODEL_DIR = MODELS_DIR / "nllb-klingon-extended"
@@ -141,10 +98,9 @@ class KlingonTranslator:
                 num_beams=num_beams,
             )
 
-        raw = self.tokenizer.decode(
+        return self.tokenizer.decode(
             outputs[0], skip_special_tokens=True
         )
-        return clean_translation(raw, target_lang=tgt_lang)
 
     def translate_batch(
         self,
@@ -180,12 +136,9 @@ class KlingonTranslator:
                 num_beams=num_beams,
             )
 
-        raw = self.tokenizer.batch_decode(
+        return self.tokenizer.batch_decode(
             outputs, skip_special_tokens=True
         )
-        return [
-            clean_translation(t, target_lang=tgt_lang) for t in raw
-        ]
 
     def to_klingon(self, text: str, **kwargs) -> str:
         """Shortcut: translate English to Klingon."""

@@ -95,6 +95,17 @@ def collect_klingon_text(
                 if pair.get("tlh", "").strip():
                     lines.append(pair["tlh"].strip())
 
+        # boQwI' monolingual Klingon data (dictionary entries,
+        # examples, notes — maximizes SPM coverage)
+        boqwi_mono = raw_dir / "boqwi_monolingual.txt"
+        if boqwi_mono.exists():
+            for line in boqwi_mono.read_text(
+                encoding="utf-8"
+            ).splitlines():
+                line = line.strip()
+                if line:
+                    lines.append(line)
+
     # Deduplicate while preserving order
     seen = set()
     unique_lines = []
@@ -169,6 +180,10 @@ def train_klingon_spm(
         byte_fallback=True,  # Unknown chars -> bytes instead of <unk>
         split_digits=True,  # Digits handled individually
         user_defined_symbols=["'"],  # Apostrophe is atomic (central to Klingon)
+        normalization_rule_name="identity",  # No normalization (preserve Klingon orthography)
+        allow_whitespace_only_pieces=False,  # Prevent whitespace-only tokens
+        remove_extra_whitespaces=True,  # Clean up whitespace in training data
+        add_dummy_prefix=True,  # Match NLLB's ▁ prefix convention
     )
 
     model_path = Path(f"{model_prefix}.model")
