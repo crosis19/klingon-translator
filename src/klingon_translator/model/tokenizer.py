@@ -24,7 +24,10 @@ from klingon_translator.utils.config import (
 )
 
 
-def collect_klingon_text(data_dir: Path | None = None) -> str:
+def collect_klingon_text(
+    data_dir: Path | None = None,
+    raw_data_dir: Path | None = None,
+) -> str:
     """Collect all available Klingon text for tokenizer training.
 
     Gathers Klingon text from processed JSONL files. When using the default
@@ -33,6 +36,8 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
     Args:
         data_dir: Directory containing processed .jsonl files.
             If None, uses the default PROCESSED_DATA_DIR and also reads raw data.
+        raw_data_dir: Directory containing raw data files (OPUS, paq'batlh, etc.).
+            If None, uses the default RAW_DATA_DIR when data_dir is also None.
 
     Returns:
         Concatenated Klingon text, one sentence per line.
@@ -52,9 +57,10 @@ def collect_klingon_text(data_dir: Path | None = None) -> str:
                 if "tlh" in pair and pair["tlh"].strip():
                     lines.append(pair["tlh"].strip())
 
-    # Also collect from raw cached data for maximum coverage (default dir only)
-    raw_dir = RAW_DATA_DIR
-    if use_defaults and raw_dir.exists():
+    # Also collect from raw cached data for maximum coverage
+    raw_dir = raw_data_dir or RAW_DATA_DIR
+    use_raw = use_defaults or raw_data_dir is not None
+    if use_raw and raw_dir.exists():
         # Tatoeba API cache
         tatoeba_cache = raw_dir / "tatoeba_pairs.json"
         if tatoeba_cache.exists():

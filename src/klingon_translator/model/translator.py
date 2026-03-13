@@ -138,11 +138,15 @@ class KlingonTranslator:
 
     def to_klingon(self, text: str, **kwargs) -> str:
         """Shortcut: translate English to Klingon."""
-        return self.translate(text, src_lang=ENGLISH_CODE, tgt_lang=KLINGON_CODE, **kwargs)
+        return self.translate(
+            text, src_lang=ENGLISH_CODE, tgt_lang=KLINGON_CODE, **kwargs
+        )
 
     def to_english(self, text: str, **kwargs) -> str:
         """Shortcut: translate Klingon to English."""
-        return self.translate(text, src_lang=KLINGON_CODE, tgt_lang=ENGLISH_CODE, **kwargs)
+        return self.translate(
+            text, src_lang=KLINGON_CODE, tgt_lang=ENGLISH_CODE, **kwargs
+        )
 
     def save(self, path: str | Path | None = None) -> Path:
         """Save model and tokenizer to disk.
