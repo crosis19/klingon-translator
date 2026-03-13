@@ -117,7 +117,10 @@ def translate_batch(
         decoded = tokenizer.batch_decode(
             outputs, skip_special_tokens=True
         )
-        results.extend(clean_translation(t) for t in decoded)
+        results.extend(
+            clean_translation(t, target_lang=tgt_lang)
+            for t in decoded
+        )
 
         if (i // batch_size) % 5 == 0:
             n = min(i + batch_size, len(texts))
