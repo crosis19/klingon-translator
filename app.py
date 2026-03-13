@@ -7,7 +7,8 @@ from klingon_translator.model.translator import KlingonTranslator
 translator = KlingonTranslator()
 
 
-def translate(text: str, direction: str) -> str:
+def translate(text: str, direction: str, _expected: str = "") -> str:
+    """Translate text. The _expected arg is unused but needed for examples."""
     if not text.strip():
         return ""
     if direction == "English → Klingon":
@@ -15,39 +16,73 @@ def translate(text: str, direction: str) -> str:
     return translator.to_english(text)
 
 
-demo = gr.Interface(
-    fn=translate,
-    inputs=[
-        gr.Textbox(label="Input", placeholder="Enter text to translate...", lines=3),
-        gr.Radio(
-            ["English → Klingon", "Klingon → English"],
-            label="Direction",
-            value="English → Klingon",
-        ),
-    ],
-    outputs=gr.Textbox(label="Translation", lines=3),
-    title="Klingon Translator",
-    description="English ↔ Klingon translation powered by fine-tuned NLLB-200.",
-    examples=[
-        ["Today is a good day to die.", "English → Klingon",
-         "Heghlu'meH QaQ jajvam."],
-        ["Qapla'!", "Klingon → English",
-         "Success!"],
-        ["Where is the bathroom?", "English → Klingon",
-         "nuqDaq 'oH puchpa''e'?"],
-        ["tlhIngan maH!", "Klingon → English",
-         "We are Klingons!"],
-        ["What do you want?", "English → Klingon",
-         "nuqneH?"],
-        ["Revenge is a dish best served cold.", "English → Klingon",
-         "bortaS bIr jablu'DI' reH QaQqu' nay'."],
-        ["qatlho'.", "Klingon → English",
-         "Thank you."],
-        ["I don't understand.", "English → Klingon",
-         "jIyajbe'."],
-    ],
-    flagging_mode="never",
-)
+EXAMPLES = [
+    ["Today is a good day to die.", "English → Klingon",
+     "Heghlu'meH QaQ jajvam."],
+    ["Qapla'!", "Klingon → English",
+     "Success!"],
+    ["Where is the bathroom?", "English → Klingon",
+     "nuqDaq 'oH puchpa''e'?"],
+    ["tlhIngan maH!", "Klingon → English",
+     "We are Klingons!"],
+    ["What do you want?", "English → Klingon",
+     "nuqneH?"],
+    ["Revenge is a dish best served cold.", "English → Klingon",
+     "bortaS bIr jablu'DI' reH QaQqu' nay'."],
+    ["qatlho'.", "Klingon → English",
+     "Thank you."],
+    ["I don't understand.", "English → Klingon",
+     "jIyajbe'."],
+]
+
+with gr.Blocks(title="Klingon Translator") as demo:
+    gr.Markdown(
+        "# Klingon Translator\n"
+        "English ↔ Klingon translation powered by fine-tuned NLLB-200."
+    )
+
+    with gr.Row():
+        with gr.Column():
+            text_input = gr.Textbox(
+                label="Input",
+                placeholder="Enter text to translate...",
+                lines=3,
+            )
+            direction = gr.Radio(
+                ["English → Klingon", "Klingon → English"],
+                label="Direction",
+                value="English → Klingon",
+            )
+            expected = gr.Textbox(
+                label="Expected Translation",
+                lines=2,
+                interactive=False,
+            )
+            translate_btn = gr.Button("Translate", variant="primary")
+
+        with gr.Column():
+            output = gr.Textbox(
+                label="Model Output", lines=3
+            )
+
+    translate_btn.click(
+        fn=translate,
+        inputs=[text_input, direction, expected],
+        outputs=output,
+    )
+    text_input.submit(
+        fn=translate,
+        inputs=[text_input, direction, expected],
+        outputs=output,
+    )
+
+    gr.Examples(
+        examples=EXAMPLES,
+        inputs=[text_input, direction, expected],
+        outputs=output,
+        fn=translate,
+        cache_examples=False,
+    )
 
 if __name__ == "__main__":
     demo.launch()
