@@ -274,9 +274,6 @@ def generate_training_report(
         "timestamp": datetime.now().isoformat(),
         "training": {
             "base_model": BASE_MODEL_ID,
-            "gpu": gc.gpu_name,
-            "gpu_memory_gb": round(gc.gpu_memory_gb, 1),
-            "mode": "A100" if gc.is_a100 else "T4",
             "epochs": tc.max_epochs,
             "batch_size": gc.batch_size,
             "gradient_accumulation": gc.gradient_accumulation_steps,
@@ -347,9 +344,6 @@ def _print_report_summary(report: dict) -> None:
     print("=" * 60)
     ts = report["timestamp"]
     print(f"  Timestamp:   {ts}")
-    gpu = t["gpu"]
-    mem = t["gpu_memory_gb"]
-    print(f"  GPU:         {gpu} ({mem} GB)")
     ep = t["epochs"]
     print(f"  Epochs:      {ep}")
     bs = t["batch_size"]
