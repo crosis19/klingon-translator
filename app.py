@@ -60,6 +60,9 @@ with gr.Blocks(title="Klingon Translator") as demo:
                 label="Model Output", lines=3
             )
 
+    # Hidden textbox so the "Expected" column appears in the examples table
+    expected = gr.Textbox(visible=False)
+
     translate_btn.click(
         fn=translate,
         inputs=[text_input, direction],
@@ -73,7 +76,7 @@ with gr.Blocks(title="Klingon Translator") as demo:
 
     gr.Examples(
         examples=EXAMPLES,
-        inputs=[text_input, direction],
+        inputs=[text_input, direction, expected],
         outputs=output,
         fn=translate,
         cache_examples=False,
