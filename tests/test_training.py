@@ -40,12 +40,8 @@ class TestGPUConfigCompatibility:
     def test_configs_are_independent(self):
         """GPU and training configs should be separate concerns."""
         gpu = GPUConfig(
-            gpu_name="Test",
-            gpu_memory_gb=16.0,
-            is_a100=False,
             batch_size=4,
             gradient_accumulation_steps=8,
-            effective_batch_size=32,
             use_bf16=False,
             use_fp16=True,
             gradient_checkpointing=True,
@@ -55,4 +51,5 @@ class TestGPUConfigCompatibility:
         tc = TrainingConfig(learning_rate=1e-4)
         # Both exist independently
         assert gpu.batch_size == 4
+        assert gpu.effective_batch_size == 32
         assert tc.learning_rate == 1e-4

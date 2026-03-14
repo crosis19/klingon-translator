@@ -140,7 +140,6 @@ def build_trainer(
     print(f"  Weight decay: {tc.weight_decay}")
     precision = "BF16" if gc_cfg.use_bf16 else "FP16" if gc_cfg.use_fp16 else "FP32"
     print(f"  Precision: {precision}")
-    print(f"  GPU: {gc_cfg.gpu_name}")
 
     return trainer
 

@@ -118,8 +118,8 @@ def test_training_modules_importable():
     )
     from klingon_translator.training.gpu import (
         GPUConfig,
-        detect_gpu,
         enable_tf32_if_available,
+        get_gpu_info,
         set_seed,
     )
     from klingon_translator.training.trainer import (
@@ -131,7 +131,7 @@ def test_training_modules_importable():
     assert all(
         x is not None
         for x in [
-            GPUConfig, detect_gpu, enable_tf32_if_available, set_seed,
+            GPUConfig, get_gpu_info, enable_tf32_if_available, set_seed,
             BilingualDataset,
             TrainingConfig, build_trainer, save_model,
             EvalScores, SampleResult, evaluate_test_set,
