@@ -7,8 +7,8 @@ from klingon_translator.model.translator import KlingonTranslator
 translator = KlingonTranslator()
 
 
-def translate(text: str, direction: str, _expected: str = "") -> str:
-    """Translate text. The _expected arg is unused but needed for examples."""
+def translate(text: str, direction: str) -> str:
+    """Translate text based on selected direction."""
     if not text.strip():
         return ""
     if direction == "English → Klingon":
@@ -53,11 +53,6 @@ with gr.Blocks(title="Klingon Translator") as demo:
                 label="Direction",
                 value="English → Klingon",
             )
-            expected = gr.Textbox(
-                label="Expected Translation",
-                lines=2,
-                interactive=False,
-            )
             translate_btn = gr.Button("Translate", variant="primary")
 
         with gr.Column():
@@ -67,18 +62,18 @@ with gr.Blocks(title="Klingon Translator") as demo:
 
     translate_btn.click(
         fn=translate,
-        inputs=[text_input, direction, expected],
+        inputs=[text_input, direction],
         outputs=output,
     )
     text_input.submit(
         fn=translate,
-        inputs=[text_input, direction, expected],
+        inputs=[text_input, direction],
         outputs=output,
     )
 
     gr.Examples(
         examples=EXAMPLES,
-        inputs=[text_input, direction, expected],
+        inputs=[text_input, direction],
         outputs=output,
         fn=translate,
         cache_examples=False,
