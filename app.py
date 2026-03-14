@@ -61,7 +61,7 @@ with gr.Blocks(title="Klingon Translator") as demo:
             )
 
     # Hidden textbox so the "Expected" column appears in the examples table
-    expected = gr.Textbox(visible=False)
+    expected = gr.Textbox(visible=False, label="Expected Translation")
 
     translate_btn.click(
         fn=translate,
