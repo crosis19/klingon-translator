@@ -40,6 +40,14 @@
 
 		"files.associations": {
 			"*.ipynb": "jupyter-notebook"
+		},
+
+		"terminal.integrated.defaultProfile.windows": "Klingon Conda",
+		"terminal.integrated.profiles.windows": {
+			"Klingon Conda": {
+				"path": "cmd.exe",
+				"args": ["/K", "C:\\Users\\joshu\\anaconda3\\Scripts\\activate.bat klingon"]
+			}
 		}
 	},
 	"extensions": {
