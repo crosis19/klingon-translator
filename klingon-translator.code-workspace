@@ -1,0 +1,52 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "C:\Users\joshu\anaconda3\envs\klingon\python.exe",
+		"python.terminal.activateEnvironment": true,
+		"python.condaPath": "C:\Users\joshu\anaconda3\Scripts\conda.exe",
+
+		"[python]": {
+			"editor.defaultFormatter": "charliermarsh.ruff",
+			"editor.formatOnSave": true
+		},
+		"ruff.lineLength": 88,
+
+		"editor.rulers": [88],
+		"editor.tabSize": 4,
+		"editor.insertSpaces": true,
+
+		"files.exclude": {
+			"**/__pycache__": true,
+			"**/.pytest_cache": true,
+			"**/*.egg-info": true,
+			"data/raw": true,
+			"data/processed": true,
+			"models/": true,
+			".ruff_cache": true
+		},
+		"search.exclude": {
+			"**/__pycache__": true,
+			"data/": true,
+			"models/": true,
+			"**/*.egg-info": true
+		},
+
+		"python.testing.pytestEnabled": true,
+		"python.testing.pytestArgs": ["tests/", "-v"],
+
+		"files.associations": {
+			"*.ipynb": "jupyter-notebook"
+		}
+	},
+	"extensions": {
+		"recommendations": [
+			"ms-python.python",
+			"charliermarsh.ruff",
+			"ms-toolsai.jupyter"
+		]
+	}
+}
